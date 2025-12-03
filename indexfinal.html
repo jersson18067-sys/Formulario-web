@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inspección Diaria de Vehículos - AP-AI-RG-214</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Librería html2pdf.js - ESENCIAL PARA LA GENERACIÓN DE PDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    
+    <!-- Configuración de Estilos -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+        /* Estilo para el contenedor del formulario (simula la hoja de papel) */
+        #form-container {
+            width: 100%;
+            max-width: 900px; 
+            margin: 0 auto;
+            background-color: white;
+            padding: 2px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+            border: 2px solid #1e3a8a; 
+        }
+        /* Estilos base de la tabla - crucial para replicar el look */
+        .doc-table {
+            border-collapse: collapse;
+            width: 100%;
+            table-layout: fixed; 
+        }
+        /* Borde general y compactación extrema para todas las celdas del documento */
+        .doc-table td, .doc-table th {
+            border: 1px solid #374151; 
+            padding: 0 2px; /* Reducción de padding */
+            height: 15px; 
+            min-height: 15px;
+            font-size: 9px; 
+            line-height: 1.1; 
+            vertical-align: middle;
+        }
+        .header-cell {
+            background-color: #e5e7eb; 
+            font-weight: 700;
+            text-align: center;
+            color: #1f2937;
+            padding: 0 2px; /* Asegura padding mínimo en headers */
+        }
+        /* Estilo para los select (SC/NC/NA) */
+        .inspection-select {
+            width: 100%;
+            height: 15px; 
+            border: none;
+            text-align: center;
+            appearance: none;
+            background-color: transparent;
+            font-size: 9px; 
+            cursor: pointer;
+            padding: 0;
+            margin: 0;
+            line-height: 1;
+        }
+        /* Estilo para los inputs de información general */
+        /* w-full asegura el 100% de la celda, p-0 se aplica a la celda en el HTML */
+        .info-input {
+            padding: 0 2px;
+            background-color: transparent;
+            font-size: 9px;
+            outline: none;
+            border: none;
+            box-sizing: border-box; 
+            text-align: left; /* Asegura que el texto esté a la izquierda */
+        }
+        /* Clase para el título grande */
+        .main-title {
+            font-size: 13px; 
+            font-weight: 900;
+            color: #1e3a8a; 
+            padding: 4px;
+        }
+        /* Ajuste específico para el área de observaciones para ocupar el espacio inferior */
+        #observaciones {
+            min-height: 100px; 
+            padding-top: 5px; 
+            vertical-align: top;
+            resize: none; 
+        }
+        
+        /* Media Query para Impresión (Opcional, pero útil para la función Print) */
+        @media print {
+            .hide-on-pdf, .hide-on-print {
+                display: none !important;
+            }
+            #form-container {
+                border: none !important;
+                box-shadow: none !important;
+                max-width: none;
+                margin: 0;
+                padding: 0;
+            }
+            .doc-table {
+                font-size: 9pt; 
+            }
+        }
+    </style>
+    
+    <!-- Librerías de Firebase y Lógica de la Aplicación -->
+    <script type="module">
+        // Importar módulos de Firebase
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, orderBy, limit, serverTimestamp, getDocs, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Variables globales para el acceso a Firebase y el estado de la app
+        window.appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+        // Inicializar Firebase
+        if (Object.keys(firebaseConfig).length > 0) {
+            window.app = initializeApp(firebaseConfig);
+            window.db = getFirestore(window.app);
+            window.auth = getAuth(window.app);
+        } else {
+            console.error("Firebase configuration is missing. Running in Demo Mode.");
+            window.db = null;
+            window.auth = null;
+        }
+
+        if (window.db) {
+            setLogLevel('Debug');
+        }
+
+        window.userId = null;
+        window.formId = null;
+
+        // --- AUTENTICACIÓN E INICIALIZACIÓN ---
+        async function authenticateAndInit() {
+            if (!window.auth) return;
+
+            try {
+                // Autenticar con token personalizado o de forma anónima
+                if (typeof __initial_auth_token !== 'undefined') {
+                    await signInWithCustomToken(window.auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(window.auth);
+                }
+            } catch (error) {
+                console.error("Firebase Auth Error:", error);
+            }
+
+            // Escuchar cambios en el estado de autenticación
+            onAuthStateChanged(window.auth, (user) => {
+                if (user) {
+                    window.userId = user.uid;
+                    document.getElementById('user-id-display').textContent = `ID Usuario: ${window.userId}`;
+                    initializeForm();
+                } else {
+                    console.log("User is signed out or sign-in failed.");
+                }
+            });
+        }
+
+        // --- FUNCIONES FIRESTORE ---
+
+        // Obtiene la referencia al documento del formulario actual
+        function getFormDocRef(id) {
+            if (!window.db || !window.userId) return null;
+            // Almacenamiento privado: /artifacts/{appId}/users/{userId}/inspecciones/{formId}
+            return doc(window.db, `artifacts/${window.appId}/users/${window.userId}/inspecciones`, id);
+        }
+
+        // Consulta para obtener los últimos formularios guardados
+        function getFormsCollectionQuery() {
+            if (!window.db || !window.userId) return null;
+            return query(
+                collection(window.db, `artifacts/${window.appId}/users/${window.userId}/inspecciones`),
+                orderBy('timestamp', 'desc'),
+                limit(10)
+            );
+        }
+
+        // Guarda los datos del formulario en Firestore
+        window.saveFormData = async function(data) {
+            if (!window.db || !window.userId || !window.formId) {
+                console.error("Database or User/Form ID not ready for saving.");
+                return;
+            }
+            try {
+                const docRef = getFormDocRef(window.formId);
+                await setDoc(docRef, {
+                    ...data,
+                    timestamp: serverTimestamp() // Usa timestamp del servidor para el orden
+                }, { merge: true });
+                document.getElementById('save-status').textContent = 'Guardado automáticamente.';
+            } catch (e) {
+                console.error("Error saving document: ", e);
+                document.getElementById('save-status').textContent = 'Error al guardar.';
+            }
+        };
+
+        // Elimina un formulario por ID
+        window.deleteForm = async function(id) {
+            if (!window.db || !window.userId) return;
+            // Confirmación simulada con modal/mensaje en consola, no se usa alert()
+            console.log(`Eliminando formulario: ${id}`);
+            try {
+                await deleteDoc(getFormDocRef(id));
+                // Si se eliminó el formulario actual, carga uno nuevo
+                if (id === window.formId) {
+                    window.loadNewForm();
+                }
+            } catch (e) {
+                console.error("Error deleting document: ", e);
+            }
+        };
+
+        // Carga un formulario específico por ID
+        window.loadFormById = async function(id) {
+            if (!window.db || !window.userId) return;
+            try {
+                const docSnap = await getDoc(getFormDocRef(id));
+                if (docSnap.exists()) {
+                    window.formId = id; // Establece el ID como el formulario actual
+                    populateForm(docSnap.data());
+                    document.getElementById('current-form-title').textContent = `Formulario Actual: ${id}`;
+                } else {
+                    console.log("No such document!");
+                    window.loadNewForm();
+                }
+            } catch (e) {
+                console.error("Error loading document: ", e);
+            }
+        };
+
+        // --- LÓGICA DE LA APLICACIÓN ---
+
+        async function initializeForm() {
+            if (!window.db || !window.userId) return;
+
+            const q = getFormsCollectionQuery();
+            try {
+                const querySnapshot = await getDocs(q);
+                if (!querySnapshot.empty) {
+                    // Carga el formulario más reciente para continuar la inspección
+                    window.formId = querySnapshot.docs[0].id;
+                } else {
+                    // Si no hay formularios, crea un ID nuevo
+                    window.formId = `Form-${Date.now()}`;
+                }
+
+                document.getElementById('current-form-title').textContent = `Formulario Actual: ${window.formId}`;
+                setupRealtimeListener(window.formId);
+                setupPastFormsListener();
+
+            } catch (e) {
+                console.error("Error initializing form data: ", e);
+                // Fallback si hay error de consulta
+                window.formId = `Form-${Date.now()}`;
+                setupRealtimeListener(window.formId);
+                document.getElementById('current-form-title').textContent = `Formulario Actual: ${window.formId}`;
+            }
+        }
+
+        // Escucha en tiempo real el formulario actual para sincronización
+        function setupRealtimeListener(id) {
+            // Cancelar listener anterior si existe
+            if (window.currentSnapshotUnsubscribe) {
+                window.currentSnapshotUnsubscribe();
+            }
+
+            window.currentSnapshotUnsubscribe = onSnapshot(getFormDocRef(id), (doc) => {
+                if (doc.exists()) {
+                    // Previene que se sobrescriban los datos si el cambio vino de esta misma sesión
+                    const source = doc.metadata.hasPendingWrites ? "local" : "server";
+                    if (source === "server") {
+                       populateForm(doc.data());
+                    }
+                    document.getElementById('save-status').textContent = 'Sincronizado.';
+                } else if (id === window.formId) {
+                    // Si el documento se borró mientras lo mirábamos, crea uno nuevo
+                    window.loadNewForm();
+                }
+            }, (error) => {
+                console.error("Error setting up form listener:", error);
+            });
+        }
+
+        // Escucha en tiempo real la lista de formularios para la UI
+        function setupPastFormsListener() {
+            const q = getFormsCollectionQuery();
+            onSnapshot(q, (snapshot) => {
+                const list = document.getElementById('past-forms-list');
+                list.innerHTML = '';
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    // Muestra la fecha de la última modificación
+                    const date = data.timestamp?.toDate ? data.timestamp.toDate().toLocaleDateString('es-CO') : 'Sin fecha';
+                    const li = document.createElement('li');
+                    li.className = 'flex justify-between items-center p-2 hover:bg-gray-100 rounded-md cursor-pointer';
+                    li.innerHTML = `
+                        <span onclick="window.loadFormById('${doc.id}')" class="truncate font-medium text-blue-600 hover:text-blue-800">${doc.id} - ${date}</span>
+                        <button onclick="event.stopPropagation(); window.deleteForm('${doc.id}')" class="text-red-500 hover:text-red-700 text-xs ml-2">Eliminar</button>
+                    `;
+                    list.appendChild(li);
+                });
+            }, (error) => {
+                console.error("Error setting up past forms listener:", error);
+            });
+        }
+
+        // Función para llenar el formulario con datos
+        function populateForm(data) {
+            document.getElementById('placa-no').value = data.placaNo || '';
+            document.getElementById('tipo-vehiculo').value = data.tipoVehiculo || '';
+            document.getElementById('marca').value = data.marca || '';
+            document.getElementById('conductor').value = data.conductor || '';
+            document.getElementById('cc').value = data.cc || '';
+            document.getElementById('seguro-soat').value = data.seguroSoat || '';
+            document.getElementById('tecnico-mecanica').value = data.tecnicoMecanica || '';
+            document.getElementById('semana-inspeccion').value = data.semanaInspeccion || '';
+            document.getElementById('dependencia').value = data.dependencia || '';
+            document.getElementById('observaciones').value = data.observaciones || '';
+
+            if (data.inspeccion) {
+                const tableBody = document.getElementById('inspection-table-body');
+                Array.from(tableBody.querySelectorAll('select')).forEach(select => {
+                    const id = select.id;
+                    if (data.inspeccion[id]) {
+                        select.value = data.inspeccion[id];
+                    }
+                });
+            }
+        }
+
+        // Función para extraer todos los datos del formulario
+        window.extractFormData = function() {
+            const formData = {
+                placaNo: document.getElementById('placa-no').value,
+                tipoVehiculo: document.getElementById('tipo-vehiculo').value,
+                marca: document.getElementById('marca').value,
+                conductor: document.getElementById('conductor').value,
+                cc: document.getElementById('cc').value,
+                seguroSoat: document.getElementById('seguro-soat').value,
+                tecnicoMecanica: document.getElementById('tecnico-mecanica').value,
+                semanaInspeccion: document.getElementById('semana-inspeccion').value,
+                dependencia: document.getElementById('dependencia').value,
+                observaciones: document.getElementById('observaciones').value,
+                inspeccion: {}
+            };
+
+            const tableBody = document.getElementById('inspection-table-body');
+            Array.from(tableBody.querySelectorAll('select')).forEach(select => {
+                formData.inspeccion[select.id] = select.value;
+            });
+
+            return formData;
+        };
+
+        // Handler para guardar cambios (llamado en cada input/change)
+        window.handleFormChange = function() {
+            // Pequeño delay para no saturar la base de datos en cada pulsación de tecla
+            clearTimeout(window.saveTimer);
+            window.saveTimer = setTimeout(() => {
+                if (window.db && window.userId && window.formId) {
+                    window.saveFormData(window.extractFormData());
+                    document.getElementById('save-status').textContent = 'Guardando...';
+                }
+            }, 500); 
+        };
+
+        // Handler para iniciar un nuevo formulario
+        window.loadNewForm = function() {
+            window.formId = `Form-${Date.now()}`;
+            document.getElementById('current-form-title').textContent = `Formulario Actual: ${window.formId}`;
+            populateForm({}); // Limpiar el formulario visualmente
+            setupRealtimeListener(window.formId); // Establecer listener para el nuevo ID
+            window.saveFormData(window.extractFormData()); // Guardar el formulario vacío/inicial
+        }
+
+        // --- FUNCIONALIDAD DE IMPRESIÓN Y PDF ---
+
+        // 1. Generar PDF (usa html2pdf.js)
+        window.generatePDF = function() {
+            const element = document.getElementById('form-container');
+            
+            // Ocultar controles de la aplicación y la lista de formularios
+            const controlsToHide = document.querySelectorAll('.hide-on-pdf');
+            controlsToHide.forEach(el => el.style.display = 'none');
+            
+            const replacements = [];
+
+            // Función auxiliar para reemplazar input/select por su valor estático (span)
+            const replaceElementWithText = (selector, isSelect = false) => {
+                element.querySelectorAll(selector).forEach(original => {
+                    const replacement = document.createElement('span');
+                    replacement.textContent = isSelect ? original.value : original.value;
+                    // Clonar estilos y dimensiones
+                    replacement.className = original.className + ' inline-block text-center'; 
+                    replacement.style.height = original.offsetHeight + 'px';
+                    replacement.style.verticalAlign = 'middle';
+                    replacement.style.width = original.offsetWidth + 'px';
+
+                    replacements.push({ original: original, replacement: replacement });
+                    original.parentNode.replaceChild(replacement, original);
+                });
+            };
+
+            // 2. Realizar reemplazos en el DOM (campos de texto y selects)
+            replaceElementWithText('.inspection-select', true);
+            replaceElementWithText('.info-input-field', false);
+            
+            // Manejo especial para el textarea de Observaciones
+            const observacionesTextarea = document.getElementById('observaciones');
+            const observacionesSpan = document.createElement('div');
+            observacionesSpan.textContent = observacionesTextarea.value;
+            observacionesSpan.className = 'w-full h-full info-input text-xs p-1 whitespace-pre-wrap';
+            observacionesSpan.style.minHeight = observacionesTextarea.style.minHeight;
+            observacionesTextarea.parentNode.replaceChild(observacionesSpan, observacionesTextarea);
+            replacements.push({ original: observacionesTextarea, replacement: observacionesSpan });
+
+
+            // 3. Configuración para html2pdf (tamaño Carta/Letter)
+            const opt = {
+                margin: 0.2, 
+                filename: `Inspeccion-Vehiculo-${document.getElementById('placa-no').value || 'Sin-Placa'}-${new Date().toLocaleDateString('es-CO').replace(/\//g, '-')}.pdf`,
+                image: { type: 'jpeg', quality: 0.98 },
+                html2canvas: { scale: 3, logging: false, dpi: 192, letterRendering: true, useCORS: true },
+                jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
+            };
+
+            // 4. Generar el PDF
+            html2pdf().set(opt).from(element).save().finally(() => {
+                // 5. Restaurar los elementos originales del DOM
+                replacements.forEach(item => {
+                    item.replacement.parentNode.replaceChild(item.original, item.replacement);
+                });
+                controlsToHide.forEach(el => el.style.display = '');
+            });
+        };
+
+        // 2. Imprimir Directamente (usa la función nativa del navegador)
+        window.printForm = function() {
+            window.print();
+        };
+
+
+        // --- PUNTO DE ENTRADA ---
+        document.addEventListener('DOMContentLoaded', () => {
+            function generateInspectionTable() {
+                // Estructura de inspección
+                const inspectionData = [
+                    { item: 'DESTINO', elements: ['Area Metropolitana', 'Viaje a provincia (especifique lugar)'] },
+                    { item: 'MOTOR', elements: [
+                        'Nivel aceite motor', 
+                        'Nivel líquido de frenos', 
+                        'Nivel hidráulico (si aplica)', 
+                        'Nivel agua limpia parabrisas', 
+                        'Nivel líquido refrigerante', 
+                        'Estado bateria'
+                    ] },
+                    { item: 'EXTERIOR', elements: [
+                        'Luces altas', 
+                        'Luces bajas', 
+                        'Luces media', 
+                        'Luces de freno', 
+                        'Luces direccionales',
+                        'Luces de reversa', 
+                        'Luces de parqueo', 
+                        'Espejos retrovisores', 
+                        'Limpiabrisas', 
+                        'Vidrios', 
+                        'Aseo exterior'
+                    ] },
+                    { item: 'LLANTAS', elements: [
+                        'Estado', 
+                        'Profundidad de labrado', 
+                        'Presión de llantas'
+                    ] },
+                    { item: 'INTERIOR', elements: [
+                        'Luces de cabina', 
+                        'Espejo retrovisor', 
+                        'Aire acondicionado', 
+                        'Asientos', 
+                        'Cinturones de seguridad', 
+                        'Freno de mano', 
+                        'Caja de cambios', 
+                        'Tablero', 
+                        'Pito', 
+                        'Aseo interior'
+                    ] },
+                    { item: 'HERRAMIENTAS', elements: [
+                        'Cruceta', 
+                        'Gato y palanca', 
+                        'Kit de herramienta', 
+                        'Kit de carretera', 
+                        'Linterna', 
+                        'Extintor'
+                    ] },
+                    { item: 'BOTIQUÍN', elements: [
+                        'Jabón o alcohol gel', 
+                        'Guantes', 
+                        'Gasa estéril', 
+                        'Algodón', 
+                        'Analgésico', 
+                        'Venda elástica', 
+                        'Curitas', 
+                        'Elemento de corte (tijeras o bisturí)', 
+                        'Pito', 
+                        'Baja lenguas'
+                    ] }
+                ];
+
+                const days = ['LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES', 'SÁBADO', 'DOMINGO'];
+                const tableBody = document.getElementById('inspection-table-body');
+
+                const sanitize = (text) => text.replace(/\s/g, '').replace(/[^\w]/g, '');
+                
+                // Ancho de ITEM: 12%
+                const ITEM_WIDTH = '12%'; 
+                // Ancho de ELEMENTO A INSPECCIONAR: 28%
+                const ELEMENT_WIDTH = '28%'; 
+                const DAY_WIDTH = '8.57%'; // 60% restante / 7 días = ~8.57%
+
+                const rows = inspectionData.map(group => {
+                    return group.elements.map((element, index) => {
+                        const elementIdBase = sanitize(group.item) + '-' + sanitize(element);
+                        
+                        return `
+                            <tr style="height: 15px;">
+                                ${index === 0 ? `<td rowspan="${group.elements.length}" class="doc-table-data header-cell w-[${ITEM_WIDTH}] align-middle">${group.item}</td>` : ''}
+                                <td class="doc-table-data w-[${ELEMENT_WIDTH}] text-left pl-2">${element}</td>
+                                ${days.map(day => `
+                                    <td class="doc-table-data p-0 text-center w-[${DAY_WIDTH}]">
+                                        <select id="${elementIdBase}-${day}" class="inspection-select" onchange="window.handleFormChange()">
+                                            <option value=""></option>
+                                            <option value="SC">SC</option>
+                                            <option value="NC">NC</option>
+                                            <option value="NA">NA</option>
+                                        </select>
+                                    </td>
+                                `).join('')}
+                            </tr>
+                        `;
+                    }).join('');
+                }).join('');
+
+                tableBody.innerHTML = rows;
+            }
+
+            generateInspectionTable();
+
+            if (window.auth) {
+                authenticateAndInit();
+            } else {
+                // Modo demo si no hay autenticación/configuración de Firebase
+                document.getElementById('save-status').textContent = 'Modo Demo (Sin guardado en la nube).';
+                window.formId = `DemoForm-${Date.now()}`;
+                document.getElementById('current-form-title').textContent = `Formulario Actual: ${window.formId}`;
+                document.getElementById('user-id-display').textContent = 'ID Usuario: Demostración';
+                // Ocultar la lista de formularios anteriores en modo demo
+                document.getElementById('past-forms-card').style.display = 'none';
+            }
+
+            // Adjuntar listener para cambios en el formulario
+            const formContainer = document.getElementById('form-container');
+            formContainer.addEventListener('input', window.handleFormChange);
+            formContainer.addEventListener('change', window.handleFormChange);
+        });
+    </script>
+</head>
+<body class="p-2 sm:p-8">
+
+    <!-- Controles de la Aplicación (No visibles en PDF/Impresión) -->
+    <div class="mb-4 space-y-3 hide-on-pdf max-w-4xl mx-auto">
+        <h1 class="text-3xl font-bold text-gray-800">Inspección Diaria de Vehículos</h1>
+        <div class="flex flex-col sm:flex-row sm:space-x-4">
+            <!-- Botón clave para generar el PDF (archivo para guardar/email) -->
+            <button onclick="window.generatePDF()" class="w-full sm:w-auto px-6 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 transition duration-150 shadow-md">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline-block mr-2" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L10 11.586l2.293-2.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
+                    <path d="M10 2a1 1 0 011 1v7a1 1 0 11-2 0V3a1 1 0 011-1z" />
+                </svg>
+                Generar y Descargar PDF
+            </button>
+            
+            <!-- Botón para imprimir directamente (usa la función nativa del navegador) -->
+            <button onclick="window.printForm()" class="w-full sm:w-auto px-6 py-2 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition duration-150 shadow-md mt-2 sm:mt-0">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline-block mr-2" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M5 4v1h10V4a2 2 0 00-2-2H7a2 2 0 00-2 2zm0 13a2 2 0 002 2h6a2 2 0 002-2v-1H5v1zM4 9a1 1 0 011-1h10a1 1 0 011 1v5a1 1 0 01-1 1H5a1 1 0 01-1-1V9z" clip-rule="evenodd" />
+                </svg>
+                Imprimir Documento
+            </button>
+            
+            <button onclick="window.loadNewForm()" class="w-full sm:w-auto px-6 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition duration-150 shadow-md mt-2 sm:mt-0">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline-block mr-2" viewBox="0 0 20 20" fill="currentColor">
+                    <path d="M17.707 9.293a1 1 0 010 1.414l-7 7a1 1 0 01-1.414 0l-7-7a1 1 0 011.414-1.414L9 14.586V3a1 1 0 112 0v11.586l5.293-5.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+                </svg>
+                Nuevo Formulario (Limpiar)
+            </button>
+        </div>
+
+        <div class="text-sm text-gray-600">
+            <span id="current-form-title" class="font-medium">Formulario Actual: Cargando...</span> |
+            <span id="save-status" class="font-medium text-blue-600">Conectando...</span> |
+            <span id="user-id-display" class="font-mono text-xs">ID Usuario: Cargando...</span>
+        </div>
+
+        <!-- Listado de Formularios Anteriores -->
+        <div id="past-forms-card" class="bg-white p-4 rounded-lg shadow-inner border border-gray-200">
+            <h3 class="text-lg font-semibold mb-2 text-gray-700">Formularios Anteriores (Haga click para cargar)</h3>
+            <ul id="past-forms-list" class="space-y-1 text-sm max-h-40 overflow-y-auto">
+                <li class="text-gray-500">Cargando lista...</li>
+            </ul>
+        </div>
+    </div>
+
+    <!-- Contenedor del Formulario (Área a capturar para PDF) -->
+    <div id="form-container">
+        
+        <!-- Cabecera de Logo/Título y Metadatos -->
+        <table class="doc-table w-full mb-1">
+            <tbody>
+                <tr>
+                    <!-- Columna 1: Logo (simulado) -->
+                    <td rowspan="2" class="w-1/4 align-middle text-center" style="border-right: none;">
+                        <div class="text-[8px] font-serif italic leading-none">República de Colombia</div>
+                        <div class="text-[9px] font-bold leading-none mb-1" style="color:#1e3a8a;">Gobernación de Santander</div>
+                        <div class="text-[10px] font-bold leading-none">Secretaría de recursos físicos</div>
+                    </td>
+                    <!-- Columna 2: Título Principal -->
+                    <td rowspan="2" class="w-1/2 align-middle text-center" style="border-left: none; border-right: none;">
+                        <h2 class="main-title">INSPECCIÓN DIARIA DE VEHÍCULOS</h2>
+                    </td>
+                    <!-- Columna 3 (Sub-cabecera - Metadatos) -->
+                    <td colspan="2" class="w-1/4 p-0">
+                        <table class="doc-table w-full">
+                            <tr style="height: 15px;">
+                                <td class="w-1/2 header-cell p-0">CÓDIGO</td>
+                                <td class="w-1/2 p-0 text-center">AP-AI-RG-214</td>
+                            </tr>
+                            <tr style="height: 15px;">
+                                <td class="w-1/2 header-cell p-0">VERSIÓN</td>
+                                <td class="w-1/2 p-0 text-center">5</td>
+                            </tr>
+                            <tr style="height: 15px;">
+                                <td class="w-1/2 header-cell p-0">FECHA DE APROBACIÓN</td>
+                                <td class="w-1/2 p-0 text-center">4/11/2025</td>
+                            </tr>
+                            <tr style="height: 15px;">
+                                <td class="w-1/2 header-cell p-0">PÁGINA</td>
+                                <td class="w-1/2 p-0 text-center">1 de 1</td>
+                            </tr>
+                        </table>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+        
+        <!-- Tabla de Información General y Referencias (Anchos Ajustados) -->
+        <table class="doc-table w-full">
+            <tbody>
+                <!-- Fila 1 -->
+                <tr style="height: 18px;">
+                    <!-- Col 1: PLACA No. (Label) - 15% (Aumentado) -->
+                    <td class="w-[15%] header-cell">PLACA No.</td>
+                    <!-- Col 2: Input Placa No. (Input) - 17% (Reducido) -->
+                    <td class="w-[17%] p-0">
+                        <input type="text" id="placa-no" class="info-input info-input-field w-full" oninput="window.handleFormChange()">
+                    </td>
+                    
+                    <!-- Col 3: SI CUMPLE: (Ref Label) - 8% -->
+                    <td class="w-[8%] header-cell">SI CUMPLE:</td>
+                    <!-- Col 4: SC (Ref Code) - 10% -->
+                    <td class="w-[10%] text-center font-bold">SC</td>
+                    
+                    <!-- Col 5: FECHA VENCIMIENTO SOAT (Date Label) - 23% (Aumentado) -->
+                    <td class="w-[23%] header-cell">FECHA VENCIMIENTO SEGURO SOAT</td>
+                    <!-- Col 6: Input SOAT (Date Input) - 27% (Reducido) -->
+                    <td class="w-[27%] p-0">
+                        <input type="date" id="seguro-soat" class="info-input info-input-field w-full" onchange="window.handleFormChange()">
+                    </td>
+                </tr>
+                <!-- Fila 2 -->
+                <tr style="height: 18px;">
+                    <!-- Col 1: TIPO DE VEHÍCULO (Label) - 15% -->
+                    <td class="header-cell">TIPO DE VEHÍCULO</td>
+                    <!-- Col 2: Input TIPO VEHÍCULO (Input) - 17% -->
+                    <td class="p-0 w-[17%]">
+                        <input type="text" id="tipo-vehiculo" class="info-input info-input-field w-full" oninput="window.handleFormChange()">
+                    </td>
+                    
+                    <!-- Col 3: NO CUMPLE: (Ref Label) - 8% -->
+                    <td class="header-cell w-[8%]">NO CUMPLE:</td>
+                    <!-- Col 4: NC (Ref Code) - 10% -->
+                    <td class="text-center font-bold w-[10%]">NC</td>
+                    
+                    <!-- Col 5: TÉCNICO MECÁNICA (Date Label) - 23% -->
+                    <td class="header-cell w-[23%]">FECHA DE VENCIMIENTO TÉCNICO-MECÁNICA</td>
+                    <!-- Col 6: Input T/M (Date Input) - 27% -->
+                    <td class="p-0 w-[27%]">
+                        <input type="date" id="tecnico-mecanica" class="info-input info-input-field w-full" onchange="window.handleFormChange()">
+                    </td>
+                </tr>
+                <!-- Fila 3 -->
+                <tr style="height: 18px;">
+                    <!-- Col 1: MARCA (Label) - 15% -->
+                    <td class="header-cell">MARCA</td>
+                    <!-- Col 2: Input MARCA (Input) - 17% -->
+                    <td class="p-0 w-[17%]">
+                        <input type="text" id="marca" class="info-input info-input-field w-full" oninput="window.handleFormChange()">
+                    </td>
+                    
+                    <!-- Col 3: NO APLICA: (Ref Label) - 8% -->
+                    <td class="header-cell w-[8%]">NO APLICA:</td>
+                    <!-- Col 4: NA (Ref Code) - 10% -->
+                    <td class="text-center font-bold w-[10%]">NA</td>
+                    
+                    <!-- Col 5: SEMANA (Label) - 23% -->
+                    <td class="header-cell w-[23%]">SEMANA DE INSPECCIÓN</td>
+                    <!-- Col 6: Input SEMANA (Input) - 27% -->
+                    <td class="p-0 w-[27%]">
+                        <input type="text" id="semana-inspeccion" class="info-input info-input-field w-full" oninput="window.handleFormChange()">
+                    </td>
+                </tr>
+                <!-- Fila 4: Conductor y Dependencia -->
+                <tr style="height: 18px;">
+                    <!-- Col 1: CONDUCTOR (Label) - 15% -->
+                    <td class="w-[15%] header-cell">CONDUCTOR</td>
+                    <!-- Col 2: Input CONDUCTOR (Input) - 17% -->
+                    <td class="w-[17%] p-0">
+                        <input type="text" id="conductor" class="info-input info-input-field w-full" oninput="window.handleFormChange()">
+                    </td>
+                    
+                    <!-- Col 3: C.C.: (Label) - 8% -->
+                    <td class="w-[8%] header-cell">C.C.:</td>
+                    
+                    <!-- Col 4: Input C.C. (Input) - 12% -->
+                    <td class="w-[12%] p-0">
+                        <input type="text" id="cc" class="info-input info-input-field w-full" oninput="window.handleFormChange()">
+                    </td>
+                    
+                    <!-- Col 5: DEPENDENCIA (Label) - 23% -->
+                    <td class="w-[23%] header-cell">DEPENDENCIA DONDE PRESTA EL SERVICIO</td>
+                    
+                    <!-- Col 6: Input DEPENDENCIA (Input) - 25% (Ajuste para sumar 100%) -->
+                    <td class="w-[25%] p-0">
+                        <input type="text" id="dependencia" class="info-input info-input-field w-full" oninput="window.handleFormChange()">
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+
+        <!-- Tabla de Inspección Principal (Encabezados) -->
+        <table class="doc-table w-full mt-1">
+            <thead>
+                <tr style="height: 20px;">
+                    <!-- Ancho del ITEM: 12% -->
+                    <th class="header-cell w-[12%]">ITEM</th> 
+                    <!-- Ancho del ELEMENTO A INSPECCIONAR: 28% -->
+                    <th class="header-cell w-[28%]">ELEMENTO A INSPECCIONAR</th>
+                    <!-- Los 7 días mantienen su ancho relativo (7 * 8.57% = 60%) -->
+                    <th class="header-cell w-[8.57%]">LUNES</th>
+                    <th class="header-cell w-[8.57%]">MARTES</th>
+                    <th class="header-cell w-[8.57%]">MIÉRCOLES</th>
+                    <th class="header-cell w-[8.57%]">JUEVES</th>
+                    <th class="header-cell w-[8.57%]">VIERNES</th>
+                    <th class="header-cell w-[8.57%]">SÁBADO</th>
+                    <th class="header-cell w-[8.57%]">DOMINGO</th>
+                </tr>
+            </thead>
+            <tbody id="inspection-table-body">
+                <!-- Contenido generado por JavaScript -->
+            </tbody>
+        </table>
+
+        <!-- Sección de Observaciones -->
+        <table class="doc-table w-full">
+            <tbody>
+                <!-- Se mantiene w-[12%] aquí también para ITEM para consistencia -->
+                <tr>
+                    <td class="header-cell w-[12%] border-r-0 align-top pt-1">Observaciones</td>
+                    <td colspan="8" class="p-0 border-l-0">
+                        <textarea id="observaciones" rows="1" class="info-input info-input-field text-xs p-1 w-full" placeholder="" oninput="window.handleFormChange()"></textarea>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+        
+        <!-- Espacio en blanco al final del documento -->
+        <div class="h-1"></div>
+
+    </div>
+
+</body>
+</html>
